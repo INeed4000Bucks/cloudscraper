@@ -10,7 +10,8 @@
 
 # Installation
 
-Clone this repository and run `pytho3n setup.py install` or `sudo python3 setup.py install` if you need elevated permissions on macOS or Linux.
+Clone this repository and run `python setup.py install` or `sudo python3 setup.py install` if you need elevated permissions on macOS or Linux.
+- On macOS you may do the alternative of running `pip3 install beautifulsoup4 tqdm cloudscraper --break-system-packages` if you're managing your version of Python externally.
 Then `pip install bs4`
 Then `pip install tqdm`
 
