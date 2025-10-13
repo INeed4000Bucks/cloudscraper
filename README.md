@@ -28,7 +28,7 @@ Any requests made from this session object to websites protected by Cloudflare a
 # Usage
 1. Install Python 3
 2. Clone this repository (download all files here)
-3. Enter 'python3 setup.py install' in the console/command prompt.  Run `pip install setuptools` if you get an error that you don't have it.
+3. Enter 'python3 setup.py install' in the console/command prompt in the downloaded directory.  Run `pip install setuptools` if you get an error that you don't have it.
 4. Take input.txt and sb_scraper.py to any directory you want and use it. The text file contains a list of video, playlist, channel or profile URLs.
 5. Or, Insert a custom .txt file as an argument in the command prompt/terminal (like 'sb_scraper.py theseurls.txt') (or drag a .txt file over the script file) into split.py to split it up into 4. You can run multiple instances of Scraper at once. 
 
