@@ -3,11 +3,14 @@ import re
 from setuptools import setup, find_packages
 from io import open
 
-with open(os.path.join(os.path.dirname(__file__), 'cloudscraper', '__init__.py')) as fp:
+with open(os.path.join(os.path.dirname(__file__), 'cloudscraper', '__init__.py'), encoding='utf-8') as fp:
     VERSION = re.match(r'.*__version__ = \'(.*?)\'', fp.read(), re.S).group(1)
 
 with open('README.md', 'r', encoding='utf-8') as fp:
     readme = fp.read()
+
+with open(os.path.join(os.path.dirname(__file__), 'requirements.txt'), encoding='utf-8') as fp:
+    requirements = [line.strip() for line in fp if line.strip() and not line.lstrip().startswith('#')]
 
 setup(
     name = 'cloudscraper',
@@ -15,6 +18,9 @@ setup(
     author_email = 'venom@gen-x.co.nz',
     version=VERSION,
     packages = find_packages(exclude=['tests*']),
+    py_modules = ['sb_scraper'],
+    python_requires = '>=3.10',
+    entry_points = {'console_scripts': ['sb-scraper=sb_scraper:main']},
     description = 'A Python module to bypass Cloudflare\'s anti-bot page.',
     long_description=readme,
     long_description_content_type='text/markdown',
@@ -32,13 +38,7 @@ setup(
         'challenge'
     ],
     include_package_data = True,
-    install_requires = [
-        'requests >= 2.9.2',
-        'requests_toolbelt >= 0.9.1',
-        'pyparsing >= 2.4.7',
-        'beautifulsoup4',
-        'tqdm'
-    ],
+    install_requires = requirements,
     classifiers=[
         'Development Status :: 5 - Production/Stable',
         'Intended Audience :: Developers',
@@ -47,10 +47,10 @@ setup(
         'Operating System :: OS Independent',
         'Programming Language :: Python',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.6',
-        'Programming Language :: Python :: 3.7',
-        'Programming Language :: Python :: 3.8',
-        'Programming Language :: Python :: 3.9',
+        'Programming Language :: Python :: 3.10',
+        'Programming Language :: Python :: 3.11',
+        'Programming Language :: Python :: 3.12',
+        'Programming Language :: Python :: 3.13',
         'Topic :: Internet :: WWW/HTTP',
         'Topic :: Software Development :: Libraries :: Application Frameworks',
         'Topic :: Software Development :: Libraries :: Python Modules'

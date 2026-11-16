@@ -1,4 +1,14 @@
-# Production
-requests >= 2.9.2
-requests_toolbelt >= 0.9.1
-pyparsing >= 2.4.7
+# Dependencies of the bundled cloudscraper-enhanced 3.0.0 release
+requests >= 2.31.0
+requests_toolbelt >= 1.0.0
+pyparsing >= 3.1.0
+pyOpenSSL >= 24.0.0
+pycryptodome >= 3.20.0
+websocket-client >= 1.7.0
+js2py >= 0.74
+brotli >= 1.1.0
+certifi >= 2024.2.2
+# Downloader application
+beautifulsoup4 >= 4.12
+yt-dlp >= 2026.10.26
+playwright >= 1.55

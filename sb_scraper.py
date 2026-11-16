@@ -1,581 +1,370 @@
+"""Download SpankBang URLs: python sb_scraper.py source.txt.
+
+Blocked requests use an ordinary, separate Chrome profile. Complete any
+verification or terms prompts yourself in that browser window.
+"""
+from __future__ import annotations
+
+import argparse
+import ast
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import time
+from urllib.parse import urljoin, urlsplit, urlunsplit
+
+import requests
 import cloudscraper
 from bs4 import BeautifulSoup
-import time
-from tqdm import tqdm
-import os
-import re
-import sys
-import platform
-import json
-
-filename = "input.txt"
-if len(sys.argv) > 1:
-    filename = sys.argv[1]
-
-config_path = 'config.txt'
-if not os.path.exists(config_path):
-    # Create the folder if it doesn't exist
-    if platform.system() == 'Windows':
-        folder_path = os.path.join(os.environ['APPDATA'], 'CB_DL')
-    else:
-        folder_path = os.path.join(os.path.expanduser("~"), 'Library/Application Support/CB_DL')
-    os.makedirs(folder_path, exist_ok=True)
-
-    # Set the config_path to the new location
-    config_path = os.path.join(folder_path, 'config.txt')
-    
-    # Create the config file with the default content
-    with open(config_path, 'w') as config_file:
-        if platform.system() == 'Windows':
-            config_file.write("ALREADY_DL_TXT: %APPDATA%\\CB_DL\\already_dl.txt")
-        else:
-            config_file.write("ALREADY_DL_TXT: ~/Library/Application Support/CB_DL/already_dl.txt")
-
-# Set the path for failed_dl.txt in the current directory
-failed_dl_path = 'failed_dl.txt'
-
-# Read the config.txt file and get the path to already_dl.txt
-
-already_dl_path = None
-with open(config_path, 'r') as config_file:
-    for line in config_file:
-        if line.startswith('ALREADY_DL_TXT:'):
-            already_dl_path = line.split(':', 1)[1].strip()
-            if platform.system() == 'Windows':
-                already_dl_path = already_dl_path.replace('%APPDATA%', os.environ['APPDATA'])
-            else:
-                already_dl_path = already_dl_path.replace('~/Library/Application Support', os.path.expanduser("~") + '/Library/Application Support')
-            break
-
-# Check if the path was found
-if already_dl_path is None:
-    print("Could not find the path to already_dl.txt in the config.txt file.")
-
-# Check if the folder for already_dl.txt exists, and if not, create it
-folder_path = os.path.dirname(already_dl_path)
-os.makedirs(folder_path, exist_ok=True)
-
-# Check if the already_dl.txt file exists, and if not, create it
-if not os.path.exists(already_dl_path):
-    print("Creating already_dl.txt file at the specified path.")
-    with open(already_dl_path, 'w'):
-        pass
-
-with open(already_dl_path, 'r') as al_dl_file:
-    al_dl_urls = al_dl_file.readlines()
-
-line_num = 0
-    
-with open(filename, "r") as input_file:
-    lines = input_file.readlines()
-    
-for i, line in enumerate(lines):
-    if 'www.' in line:
-        lines[i] = line.replace('www.', '')
-
-def remove_country_subdomain(url):
-    return re.sub(r'https?://(\w+\.)?spankbang\.com/', 'https://spankbang.com/', url)
-
-second_best_quality_url = None
-def get_highest_quality_video_url(html):
-    global second_best_quality_url  # Indicate that we're using the global variable
-
-    match = re.search(r'var stream_data = ({.*?});', html, re.DOTALL)
-    if match:
-        stream_data_str = match.group(1)
-        
-        try:
-            stream_data_str = stream_data_str.replace("'", '"')
-            stream_data = json.loads(stream_data_str)
-            
-            available_qualities = ['4k', '1080p', '720p', '480p', '320p', '240p']
-            found_qualities = [q for q in available_qualities if stream_data.get(q)]
-
-            if found_qualities:
-                # Set the highest quality URL
-                highest_quality_url = stream_data[found_qualities[0]][0]
-
-                # Set the second highest quality URL if available
-                if len(found_qualities) > 1:
-                    second_best_quality_url = stream_data[found_qualities[1]][0]
-                else:
-                    second_best_quality_url = None
-
-                return highest_quality_url
-
-        except json.JSONDecodeError as e:
-            print("JSON decode error:", e)
-
-    return None
-
-for line in lines:
-    incaseofplaylist = line
-    line = remove_country_subdomain(line)
-    if any(line[:32] == url[:32] for url in al_dl_urls):
-        print(f"The URL {line.strip()} already exists in already_dl.txt")
-
-al_dl_urls = [remove_country_subdomain(url) for url in al_dl_urls]
-
-# Now clean the new URLs and check against al_dl_urls
-lines = [remove_country_subdomain(line.strip()) for line in lines]
-
-# Filter out URLs that already exist in al_dl_urls
-lines = [line for line in lines if not any(line[:32] == url[:32] for url in al_dl_urls)]
-
-def page_exists(url):
-    for _ in range(7):
-        try:
-            scraper = cloudscraper.create_scraper()
-            response = scraper.head(url, timeout=5)
-            return response.status_code < 400
-        except (scraper.ConnectionError, scraper.Timeout):
-            pass
-        time.sleep(1)
-    return False
-def scrape_profile(url):
-    username = re.search(r'/profile/(\w+)', url).group(1)
-    profile_urls = []
-    
-    # Check if a specific page number is already in the URL
-    page_match = re.search(r'[?&]page=(\d+)', url)
-    if page_match:
-        print("page specified")
-        start_page = int(page_match.group(1))
-        end_page = start_page + 1
-    else:
-        start_page = 1
-        end_page = float('inf')  # Continue indefinitely
-
-    page = start_page
-    max_retries = 3  # Number of retries per page
-
-    while page < end_page:
-        retry_count = 0
-        videos_found = False
-
-        while retry_count < max_retries and not videos_found:
-            page_url = f"https://spankbang.com/profile/{username}?o=new&page={page}"
-            #print(page_url)  # Debug: print the page URL
-
-            scraper = cloudscraper.create_scraper()
-            html = scraper.get(page_url).text
-
-            soup = BeautifulSoup(html, 'html.parser')
-            video_items = soup.select('div.video-list-with-ads div.video-item > a.thumb')
-
-            if video_items:
-                videos_found = True
-                for item in video_items:
-                    if 'href' in item.attrs:
-                        video_url = 'https://spankbang.com' + item['href']
-                        profile_urls.append(video_url)
-
-            else:
-                #print(f"No video items found on page {page}, retry {retry_count + 1}/{max_retries}.")
-                retry_count += 1
-                time.sleep(1)  # Pause between retries
-
-        if not videos_found:
-            #print(f"No videos found on page {page} after {max_retries} retries.")
-            print(f"Collected URLs from {username}")
-            break
-
-        page += 1
-
-    username = username.rstrip()
-    username = username.replace("Watch ", "")
-    username = username.replace(": ", "- ")
-    username = username.replace(" :", " -")
-    username = username.replace(":", "-")
-    username = username.replace("/", "-")
-    username = username.replace("?", "-")
-    username = username.replace("|", "-")
-    username = username.replace("<", "-")
-    username = username.replace(">", "-")
-    username = username.replace("*", "")
-    username = username.replace("\\", "")
-    username = username.replace("\"", "")
-    username = username.replace("\t", " ")
-    username = username.replace("\x08", "")
-
-    with open(f"{username}_profile_videos.txt", 'w') as file:
-        for url in profile_urls:
-            file.write(url + '\n')
+from playwright.sync_api import Error as BrowserError, sync_playwright
+from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadError
 
 
-
-def scrape_channel(url):
-    match = re.search(r'/(\w\w)/channel/(\w+)', url)
-    channel_code = match.group(1)
-    channel_name = match.group(2)
-    channel_urls = []
-    page = 1
-    print(channel_name)
-
-    # First, find out the total number of pages
-    scraper = cloudscraper.create_scraper()
-    initial_url = f"https://spankbang.com/{channel_code}/channel/{channel_name}/1/"
-    html = scraper.get(initial_url).text
-    soup = BeautifulSoup(html, 'html.parser')
-    last_page_link = soup.find('li', {'class': 'next'}).find_previous_sibling('li')
-    total_pages = int(last_page_link.text) if last_page_link and last_page_link.text.isdigit() else 1
-
-    while page <= total_pages:
-        page_url = f"https://spankbang.com/{channel_code}/channel/{channel_name}/{page}/"
-        successful = False
-
-        while not successful:
-            try:
-                html = scraper.get(page_url).text
-                soup = BeautifulSoup(html, 'html.parser')
-                video_items = soup.select('div.video-item > a.thumb')
-
-                if video_items:
-                    successful = True
-                    for item in video_items:
-                        if 'href' in item.attrs:
-                            video_url = 'https://spankbang.com' + item['href']
-                            channel_urls.append(video_url)
-                else:
-                    print(f"No video items found on page {page}, retrying.")
-                    time.sleep(1)  # Pause before retry
-
-            except Exception as e:
-                print(f"Error encountered: {e}. Retrying page {page}.")
-                time.sleep(1)  # Pause before retry
-
-        page += 1
-    
-    channel_name = channel_name.rstrip()
-    channel_name = channel_name.replace("Watch ", "")
-    channel_name = channel_name.replace(": ", "- ")
-    channel_name = channel_name.replace(" :", " -")
-    channel_name = channel_name.replace(":", "-")
-    channel_name = channel_name.replace("/", "-")
-    channel_name = channel_name.replace("?", "-")
-    channel_name = channel_name.replace("|", "-")
-    channel_name = channel_name.replace("<", "-")
-    channel_name = channel_name.replace(">", "-")
-    channel_name = channel_name.replace("*", "")
-    channel_name = channel_name.replace("\\", "")
-    channel_name = channel_name.replace("\"", "")
-    channel_name = channel_name.replace("\t", " ")
-    channel_name = channel_name.replace("\x08", "")
-
-    with open(f"{channel_name}_channel_videos.txt", 'w') as file:
-        for url in channel_urls:
-            file.write(url + '\n')
+def normalize_url(url):
+    parts = urlsplit(url.strip())
+    host = (parts.hostname or "").lower()
+    if parts.scheme not in {"http", "https"} or not (host == "spankbang.com" or host.endswith(".spankbang.com")):
+        raise ValueError(f"Not a SpankBang URL: {url.strip()}")
+    if parts.username or parts.password or parts.port:
+        raise ValueError("URLs must not include credentials or custom ports")
+    return urlunsplit(("https", "spankbang.com", parts.path or "/", parts.query, ""))
 
 
-illegal_chars = ['<', '>', ':', '"', '/', '\\', '|', '?', '*']
-for line in lines:
-    line = line.strip()
-    line_num+=1
-    url = remove_country_subdomain(line)
-    if 'https://spankbang.com/' not in url and 'http://spankbang.com/' not in url:
-        print("SpankBang is not in line " + str(line_num))
-        print(url)
-        continue
-    # Check for Channel URL
-    if re.search(r"/\w\w/channel/\S+", url):
-        scrape_channel(url)
-        continue
-    # Check for Profile URL
-    if re.search("/profile/\\S+", url):
-        scrape_profile(url)
-        continue
-    match = re.search("/playlist/\\S+", url)
-    if match:
-        genesisURL = url
-        page_number = 1
-        last_part = url.rsplit('/', 1)[-1]
-        if re.match(r"^\d+$", last_part):
-            page_number = int(last_part)
-        while True:
-            url = genesisURL + '/' + str(page_number)
-            if not page_exists(url):
-                break
-            scraper = cloudscraper.create_scraper()
-            html = scraper.get(url).text
-            soup = BeautifulSoup(html, 'html.parser')
-            title = soup.title.string if soup.title else None
-            title = title.replace(' Playlist - HD Porn Videos - SpankBang', '')
-            
-            for char in illegal_chars:
-                title = title.replace(char, '-')
-            curator_span = soup.find('span', {'class': 'parent'})
-            if curator_span is not None:
-                curator_link = curator_span.find('a')
-                if curator_link is not None:
-                    curator = curator_link.text
-                for char in illegal_chars:
-                    curator = curator.replace(char, '')
-            else:
-                print('Curator not found')
-                curator = "Anon"
-            
-            # New code to extract video URLs
-            video_items = soup.find_all('div', class_='video-item')
-            video_urls = []
-            for item in video_items:
-                a_tag = item.find('a', href=True)
-                if a_tag:
-                    relative_url = a_tag['href']
-                    full_url = 'https://spankbang.com' + relative_url
-                    video_urls.append(full_url)
-            
-            # Write video_urls to a txt file named after title
-            with open(title + " - " + curator + '.txt', 'a') as f:
-                for url in video_urls:
-                    f.write(url + '\n')
-            
-            print("Page " + str(page_number))
-            print('\n'.join(video_urls))
-            
-            if not video_urls:
-                break
-            else:
-                page_number += 1
-            time.sleep(1)
-        
-        # Process the collected URLs
-        with open(title + " - " + curator + '.txt', "r") as urls_file:
-            urls_lines = urls_file.readlines()
-        with open(title + " - " + curator + '.txt', "w") as urls_file:
-            for i, url in enumerate(urls_lines):
-                print(str(i))
-                html = scraper.get(url.strip()).text
-                soup = BeautifulSoup(html, 'html.parser')
-                og_url_tag = soup.select_one('meta[property="og:url"]')
-                if og_url_tag is not None:
-                    og_url = og_url_tag['content']
-                    print(og_url)
-                    urls_lines[i] = og_url + '\n'
-            urls_file.writelines(urls_lines)
-        continue
-    
-    for attempt in range(7):
-        
-        scraper = cloudscraper.create_scraper()  # returns a CloudScraper instance
-        html = scraper.get(url).text  # return html
-
-        soup = BeautifulSoup(html, 'html.parser')
+def video_id(url):
+    path = urlsplit(url).path
+    match = re.match(r"/([a-z0-9]+)/(?:video|play|embed)(?:/|$)", path)
+    if not match:
+        match = re.match(r"/[a-z0-9]+-([a-z0-9]+)/playlist/", path)
+    return match.group(1) if match else None
 
 
-        # Find the ul element with class "video_toolbar"
-        ul_video_toolbar = soup.find('ul', class_='video_toolbar')
-        if ul_video_toolbar:
-            # Find the a tag inside the ul element
-            a_tag = soup.find('a', class_='ul')
+def url_key(url):
+    return video_id(url) or normalize_url(url).rstrip("/")
 
-            if a_tag and 'href' in a_tag.attrs:
-                # Extract the uploader name from the href attribute
-                uploader_name = a_tag['href'].replace('/profile/', '') #/profile/ is in basic user names
-                if '/' in uploader_name:
-                    uploader_name = uploader_name.replace('/', '')
-                    
-                #remove the string "channel" from uploader's name
-                if "channel" in uploader_name and "mychannel" not in uploader_name:
-                    index = uploader_name.find("channel")
-                    if index == 2:
-                        uploader_name = uploader_name.replace(uploader_name[:index + len("channel")], "")
-                print("Uploader name:", uploader_name)
-                if uploader_name:
-                    for char in illegal_chars:
-                        uploader_name = uploader_name.replace(char, '-')
+
+def read_urls(path):
+    return list(dict.fromkeys(line.strip() for line in path.read_text(encoding="utf-8-sig").splitlines()
+                             if line.strip() and not line.lstrip().startswith("#")))
+
+
+def state_directory():
+    if sys.platform == "win32":
+        return Path(os.environ.get("APPDATA", Path.home() / "AppData/Roaming")) / "CB_DL"
+    if sys.platform == "darwin":
+        return Path.home() / "Library/Application Support/CB_DL"
+    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "CB_DL"
+
+
+def history_path():
+    candidates = [Path.cwd() / "config.txt", Path(__file__).resolve().parent / "config.txt", state_directory() / "config.txt"]
+    config = next((path for path in candidates if path.is_file()), None)
+    if config:
+        for line in config.read_text(encoding="utf-8-sig").splitlines():
+            if line.startswith("ALREADY_DL_TXT:"):
+                value = line.split(":", 1)[1].strip()
+                if not value:
                     break
-                else:
-                    time.sleep(4)
-            else:
-                print("Hmm...")
+                path = Path(os.path.expandvars(os.path.expanduser(value)))
+                return path if path.is_absolute() else config.parent / path
+        raise ValueError(f"Missing ALREADY_DL_TXT in {config}")
+    return state_directory() / "already_dl.txt"
+
+
+def safe_name(text):
+    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "-", text).strip(" .")[:120]
+    if not text or re.match(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)", text, re.I):
+        text = "_" + text
+    return text
+
+
+class PageClient:
+    """Reuse one HTTP session and, when needed, one normal Chrome window."""
+
+    def __init__(self, *, timeout=30, browser=True, browser_wait=180, profile=None):
+        if cloudscraper.__version__ != "3.0.0":
+            raise RuntimeError("This downloader requires the bundled cloudscraper 3.0.0; update the complete checkout.")
+        # 3.0.0's automatic refresh can recursively re-enter request(). Keep its
+        # normal challenge handling, with explicit Chrome fallback for failures.
+        self.session = cloudscraper.create_scraper(
+            auto_refresh_on_403=False,
+            session_refresh_interval=float("inf"),
+            # Challenge handlers issue nested requests on this same session.
+            # The app is sequential, so a concurrency gate would only deadlock them.
+            max_concurrent_requests=float("inf"),
+        )
+        self.timeout, self.allow_browser, self.browser_wait = timeout, browser, browser_wait
+        self.profile = profile or state_directory() / "chrome-profile"
+        self.browser = self.context = self.page = self.playwright = self.process = None
+
+    def start_browser(self):
+        candidates = [shutil.which("google-chrome"), shutil.which("chrome"), shutil.which("chromium"),
+                      str(Path(os.environ.get("PROGRAMFILES", "C:/Program Files")) / "Google/Chrome/Application/chrome.exe"),
+                      str(Path(os.environ.get("PROGRAMFILES(X86)", "C:/Program Files (x86)")) / "Google/Chrome/Application/chrome.exe"),
+                      str(Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "Google/Chrome/Application/chrome.exe"),
+                      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+        executable = next((path for path in candidates if path and Path(path).is_file()), None)
+        if not executable:
+            raise RuntimeError("Google Chrome is required for blocked pages. Install Chrome, or use --no-browser.")
+        self.profile.mkdir(parents=True, exist_ok=True)
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        endpoint = f"http://127.0.0.1:{port}"
+        self.process = subprocess.Popen([executable, f"--remote-debugging-port={port}",
+            "--remote-debugging-address=127.0.0.1", f"--user-data-dir={self.profile.resolve()}",
+            "--no-first-run", "--no-default-browser-check", "about:blank"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + self.timeout
+        while time.monotonic() < deadline:
+            try:
+                requests.get(endpoint + "/json/version", timeout=1).raise_for_status()
+                break
+            except requests.RequestException:
+                time.sleep(0.25)
         else:
-            print("Hold...")
-        time.sleep(1)
-    else:
-        print("Failed to find uploader name")
-        uploader_name = "_"
+            raise RuntimeError("Could not connect to downloader Chrome. Close any previous downloader window and retry.")
+        self.playwright = sync_playwright().start()
+        self.browser = self.playwright.chromium.connect_over_cdp(endpoint, timeout=self.timeout * 1000)
+        self.context = self.browser.contexts[0]
+        self.page = self.context.new_page()
+        self.session.headers["User-Agent"] = self.page.evaluate("navigator.userAgent")
+        print("Using downloader Chrome. Complete any verification/age/terms prompts yourself in its window.", flush=True)
 
-    # Find the video tag with the id "main_video_player" and get the source tag within it
-    video_tag = soup.find('video', {'id': 'main_video_player'})
-    source_tag = video_tag.find('source') if video_tag else None
-    
-    if source_tag:
-        # Get the video URL from the source tag
-        scraper = cloudscraper.create_scraper()
-        html = scraper.get(url).text
-        # Use the function to get the highest quality video URL
-        video_url = get_highest_quality_video_url(html)
-        if video_url:
-            print("Highest quality video URL:", video_url)
-        else:
-            print("Failed to find video URL in the page source.")
+    def get(self, url, *, force_browser=False):
+        if not force_browser:
+            try:
+                with self.session.get(url, timeout=self.timeout) as response:
+                    challenge = "just a moment" in response.text[:2000].lower() or response.status_code in {401, 403, 429}
+                    age_gate = 'id="age-check"' in response.text or "id='age-check'" in response.text
+                    if not challenge and not age_gate:
+                        response.raise_for_status()
+                        return response.text
+            finally:
+                # This client is sequential. Enhanced 3.0.0 leaks its throttle
+                # counter on exceptions; don't let one failure deadlock a batch.
+                self.session.current_concurrent_requests = 0
+        if not self.allow_browser:
+            raise RuntimeError("Site requires browser access. Run again without --no-browser to use Chrome.")
+        if not self.page:
+            self.start_browser()
+        response = self.page.goto(url, wait_until="domcontentloaded", timeout=self.timeout * 1000)
+        deadline = time.monotonic() + self.browser_wait
+        while time.monotonic() < deadline:
+            title = self.page.title().lower()
+            blocked = any(text in title for text in ("just a moment", "attention required", "verify you are human"))
+            gate = any(self.page.locator(selector).is_visible() for selector in ("#age-check", "#advanced-av"))
+            if not blocked and not gate:
+                if response and response.status >= 400 and not self.page.locator("#video, h1").count():
+                    raise RuntimeError(f"HTTP {response.status}: {url}")
+                html = self.page.content()
+                for cookie in self.context.cookies([url]):
+                    self.session.cookies.set(cookie["name"], cookie["value"], domain=cookie["domain"], path=cookie["path"])
+                return html
+            self.page.wait_for_timeout(500)
+        raise RuntimeError(f"Browser verification was not completed within {self.browser_wait}s; rerun when ready")
 
-        print("Video URL:", video_url)
-    else:
-        print("Failed to find the source tag.")
-        continue
-
-
-    video_title_tag = soup.find('title')
-    if video_title_tag:
-        video_title_text = video_title_tag.text
-        video_title_text, _, _ = video_title_text.rpartition('-')
-        image_title_text, _, _ = video_title_text.rpartition('-')
-        #remove trailing space
-        video_title_text = video_title_text.rstrip()
-        video_title_text = video_title_text.replace("Watch ", "", 1)
-        
-        image_title_text = image_title_text.rstrip()
-        image_title_text = image_title_text.replace("Watch ", "")
-        image_title_text = image_title_text.replace(": ", "- ")
-        image_title_text = image_title_text.replace(" :", " -")
-        image_title_text = image_title_text.replace(":", "-")
-        image_title_text = image_title_text.replace("/", "-")
-        image_title_text = image_title_text.replace("?", "-")
-        image_title_text = image_title_text.replace("|", "-")
-        image_title_text = image_title_text.replace("<", "-")
-        image_title_text = image_title_text.replace(">", "-")
-        image_title_text = image_title_text.replace("*", "")
-        image_title_text = image_title_text.replace("\\", "")
-        image_title_text = image_title_text.replace("\"", "")
-        image_title_text = image_title_text.replace("\t", " ")
-        image_title_text = image_title_text.replace("\x08", "")
-        image_title_text = image_title_text[:127]
-        video_title_text = video_title_text.rstrip()
-        video_title_text = video_title_text.replace("Watch ", "")
-        video_title_text = video_title_text.replace(": ", "- ")
-        video_title_text = video_title_text.replace(" :", " -")
-        video_title_text = video_title_text.replace(":", "-")
-        video_title_text = video_title_text.replace("/", "-")
-        video_title_text = video_title_text.replace("?", "-")
-        video_title_text = video_title_text.replace("|", "-")
-        video_title_text = video_title_text.replace("<", "-")
-        video_title_text = video_title_text.replace(">", "-")
-        video_title_text = video_title_text.replace("*", "")
-        video_title_text = video_title_text.replace("\\", "")
-        video_title_text = video_title_text.replace("\"", "")
-        video_title_text = video_title_text.replace("\t", " ")
-        video_title_text = video_title_text.replace("\x08", "")
-        video_title_text = video_title_text[:127]
-        if video_title_text != 'Free Porn Videos and Movies':
-            print(video_title_text)
-        else:
-            print('Failed to find title.')
-    else:
-        print("Failed to find title.")
-
-
-
-    # find and dl image
-    img_tag = soup.find('div', class_='play_cover').find('img')
-    img_url = img_tag['src'].replace('w:300', 'w:1600')
-
-
-    img_response = scraper.get(img_url)
-
-    # Check if the request was successful
-    if img_response.status_code == 200:
-        in_counter = 1 #image number counter
-
-        base_image_filename = f'{uploader_name} - {image_title_text}'
-        
-        image_filename = f'{base_image_filename}.jpg'
-        # Check if the file already exists and increment
-        while os.path.exists(image_filename):
-            image_filename = f'{base_image_filename} ({in_counter}).jpg'
-            in_counter += 1
-        with open(image_filename, 'wb') as f:
-            f.write(img_response.content)
-            print("Image downloaded successfully.")
-    else:
-        print("Failed to download the image.")
-
-
-    #dl vid
-    # Define the maximum number of retries and the initial delay
-    max_retries = 3
-    retry_delay = 5  # 5 seconds delay
-    attempt = 0
-    download_successful = False
-    current_quality_url = video_url
-
-    # Loop for the maximum number of retries
-    while attempt < max_retries:
+    def close(self):
         try:
-            response = scraper.get(current_quality_url, stream=True)
-            total_size = int(response.headers.get('Content-Length', 0))
+            if self.browser:
+                self.browser.close()
+        finally:
+            if self.playwright:
+                self.playwright.stop()
+            if self.process and self.process.poll() is None:
+                self.process.terminate()
+            self.session.close()
 
-            if response.status_code == 200:
-                counter = 1
-                base_filename = f'{uploader_name} - {video_title_text}'
-                video_filename = f'{base_filename}.mp4'
 
-                while os.path.exists(video_filename):
-                    video_filename = f'{base_filename} ({counter}).mp4'
-                    counter += 1
-
-                with open(video_filename, 'wb') as f:
-                    with tqdm(total=total_size, unit='B', unit_scale=True, desc="Downloading video") as pbar:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            f.write(chunk)
-                            pbar.update(len(chunk))
-
-                if pbar.n == total_size:
-                    print(f'Video downloaded successfully.' )
-                    download_successful = True
-                    with open(already_dl_path, 'a') as al_dl_file:
-                        al_dl_file.write('\n' + line)
-                    break  # Break out of the loop if download is successful
-                else:
-                    raise Exception("Download incomplete")
-        except Exception as e:
-            print(f"Attempt {attempt + 1} failed: {e}")
-            attempt += 1
-            if attempt < max_retries:
-                print(f"Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-
-    # If highest quality download fails, attempt second highest quality once
-    if not download_successful and second_best_quality_url:
-        print("Attempting to download second highest quality video.")
+def extract_video(html, url):
+    soup = BeautifulSoup(html, "html.parser")
+    if soup.select_one(".video_removed, #video_removed"):
+        raise ValueError("This video has been removed")
+    streams = {}
+    match = re.search(r"\b(?:var|let|const)\s+stream_data\s*=\s*(\{.*?\})\s*;", html, re.S)
+    if match:
         try:
-            response = scraper.get(second_best_quality_url, stream=True)
-            total_size = int(response.headers.get('Content-Length', 0))
+            streams = json.loads(match[1])
+        except json.JSONDecodeError:
+            try:
+                streams = ast.literal_eval(match[1])
+            except (SyntaxError, ValueError):
+                pass
+    if not isinstance(streams, dict):
+        streams = {}
+    formats = []
+    for quality, values in streams.items():
+        if not re.fullmatch(r"\d+p|[248]k", quality, re.I):
+            continue
+        height = int(quality[:-1]) * (540 if quality.lower().endswith("k") else 1)
+        for value in values if isinstance(values, list) else [values]:
+            if isinstance(value, str) and value.startswith(("https://", "http://")):
+                formats.append({"url": value, "format_id": quality, "height": height, "ext": "mp4"})
+    if not formats:
+        # Ignore unrelated previews and ads, which also use video tags.
+        for source in soup.select("video#main_video_player source[src], #main_video_player_html5_api source[src], video#main_video_player[src]"):
+            formats.append({"url": urljoin(url, source["src"]), "format_id": "source", "ext": "mp4"})
+    if not formats:
+        raise ValueError("No downloadable video streams found on the page")
+    title = soup.select_one('[data-testid="video-title"], h1')
+    title = title.get_text(" ", strip=True) if title else (soup.title.get_text(strip=True) if soup.title else video_id(url))
+    uploader = soup.select_one('#video a[href*="/profile/"], .video_toolbar a.ul, a.ul[href]')
+    uploader_name = None
+    if uploader:
+        uploader_name = uploader.get_text(" ", strip=True)
+        if not uploader_name or uploader_name == "None":
+            uploader_name = uploader.get("href", "").strip("/").split("/")[-1]
+    thumbnail = soup.select_one('meta[property="og:image"]')
+    cover = streams.get("cover_image") or (thumbnail.get("content") if thumbnail else None)
+    return {"id": video_id(url), "title": title, "uploader": uploader_name or "Unknown",
+            "webpage_url": url, "extractor_key": "SpankBang", "extractor": "spankbang",
+            "thumbnail": cover, "formats": formats}
 
-            if response.status_code == 200:
-                counter = 1
-                base_filename += ' - lower quality'
-                video_filename = f'{base_filename}.mp4'
 
-                while os.path.exists(video_filename):
-                    video_filename = f'{base_filename} ({counter}).mp4'
-                    counter += 1
+def collect_collection(client, url, max_pages=1000):
+    videos, visited, title = {}, set(), None
+    specific_page = "/profile/" in urlsplit(url).path and "page=" in urlsplit(url).query
+    for _ in range(max_pages):
+        if url in visited:
+            break
+        visited.add(url)
+        soup = BeautifulSoup(client.get(url), "html.parser")
+        if title is None:
+            heading = soup.select_one('h1, [data-testid="playlist-title"]')
+            title = heading.get_text(" ", strip=True) if heading else urlsplit(url).path.strip("/").replace("/", "-")
+        listing = soup.select_one('.video-list-with-ads, .video-list, #video_list, [data-testid="video-list"], main') or soup
+        before = len(videos)
+        for anchor in listing.select('a[href]'):
+            try:
+                candidate = normalize_url(urljoin(url, anchor["href"]))
+            except ValueError:
+                continue
+            identity = video_id(candidate)
+            if identity:
+                videos[identity] = f"https://spankbang.com/{identity}/video/"
+        next_link = soup.select_one('a[rel~="next"], li.next a, a.next, a[data-testid="pagination-next"]')
+        if specific_page or not next_link or len(videos) == before:
+            break
+        url = normalize_url(urljoin(url, next_link["href"]))
+    else:
+        raise RuntimeError(f"Stopped at {max_pages} collection pages; increase --max-pages if intended")
+    if not videos:
+        raise ValueError("No video links found in the collection")
+    return title, list(videos.values())
 
-                with open(video_filename, 'wb') as f:
-                    with tqdm(total=total_size, unit='B', unit_scale=True, desc="Downloading lower quality video") as pbar:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            f.write(chunk)
-                            pbar.update(len(chunk))
 
-                if pbar.n == total_size:
-                    print(f'Second highest quality video downloaded successfully.')
-                    with open(already_dl_path, 'a') as al_dl_file:
-                        al_dl_file.write('\n' + line)
-                else:
-                    raise Exception("Download incomplete - lower quality")
-        except Exception as e:
-            error_message = f"Failed to download: {e}"
-            print(error_message)
-            
-            # Create failed_dl.txt if it doesn't exist
-            if not os.path.exists(failed_dl_path):
-                with open(failed_dl_path, 'w') as failed_dl_file:
-                    pass
+def download_video(info, client, output):
+    options = {"outtmpl": str(output / "%(uploader|Unknown)s - %(title).100B [%(id)s] %(format_id)s.%(ext)s"),
+               "format": "best[ext=mp4]/best", "windowsfilenames": True, "writethumbnail": True,
+               "continuedl": True, "overwrites": False, "retries": 3, "fragment_retries": 3,
+               "socket_timeout": client.timeout,
+               "http_headers": {"User-Agent": client.session.headers["User-Agent"], "Referer": info["webpage_url"]}}
+    with YoutubeDL(options) as downloader:
+        for cookie in client.session.cookies:
+            downloader.cookiejar.set_cookie(cookie)
+        for index, candidate in enumerate(sorted(info["formats"], key=lambda f: f.get("height", 0), reverse=True)):
+            try:
+                # Quality in the filename prevents resuming one quality's bytes
+                # into a different quality when falling back.
+                return downloader.process_ie_result({**info, "formats": [candidate]}, download=True)
+            except DownloadError:
+                if index == len(info["formats"]) - 1:
+                    raise
+                print("Trying the next available quality...", flush=True)
 
-            # Check for duplication before writing to failed_dl.txt
-            with open(failed_dl_path, 'r') as failed_dl_file:
-                existing_lines = failed_dl_file.readlines()
 
-            if line + '\n' not in existing_lines:
-                with open(failed_dl_path, 'a') as failed_dl_file:
-                    failed_dl_file.write(line + '\n')
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("source", nargs="?", type=Path, default=Path("input.txt"))
+    parser.add_argument("-o", "--output", type=Path, default=Path.cwd())
+    parser.add_argument("--check", action="store_true", help="Extract metadata without downloading or changing history")
+    parser.add_argument("--no-browser", action="store_true", help="Fail clearly when direct HTTP access is blocked")
+    parser.add_argument("--browser", action="store_true", help="Use downloader Chrome from the start")
+    parser.add_argument("--browser-wait", type=int, default=180, help="Seconds to wait for manual browser verification")
+    parser.add_argument("--timeout", type=int, default=30)
+    parser.add_argument("--max-pages", type=int, default=1000)
+    parser.add_argument("--history", type=Path, help="Override completed-download history path")
+    args = parser.parse_args(argv)
+    if min(args.timeout, args.browser_wait, args.max_pages) < 1 or (args.browser and args.no_browser):
+        parser.error("Timeouts/max-pages must be positive; --browser and --no-browser are mutually exclusive")
+    try:
+        urls = read_urls(args.source)
+        history = args.history if args.history is not None else history_path()
+        completed = set()
+        for old in read_urls(history) if history.exists() else []:
+            try:
+                completed.add(url_key(normalize_url(old)))
+            except ValueError:
+                continue
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
+    client = PageClient(timeout=args.timeout, browser=not args.no_browser, browser_wait=args.browser_wait)
+    failed, downloaded, skipped, exported, checked = [], 0, 0, 0, 0
+    try:
+        for index, raw_url in enumerate(urls, 1):
+            print(f"[{index}/{len(urls)}] {raw_url}", flush=True)
+            try:
+                url = normalize_url(raw_url)
+                identity = video_id(url)
+                if identity and url_key(url) in completed:
+                    print("Already downloaded; skipping.", flush=True)
+                    skipped += 1
+                    continue
+                if not identity:
+                    if not re.search(r"/(profile|channel|playlist)/", url):
+                        raise ValueError("Expected a video, profile, channel, or playlist URL")
+                    if args.browser and not client.page:
+                        client.start_browser()
+                    title, links = collect_collection(client, url, args.max_pages)
+                    if not args.check:
+                        args.output.mkdir(parents=True, exist_ok=True)
+                        path = args.output / (safe_name(title) + "_videos.txt")
+                        path.write_text("\n".join(links) + "\n", encoding="utf-8")
+                        print(f"Exported {len(links)} URLs to {path}")
+                    else:
+                        print(f"Found {len(links)} collection URLs")
+                    exported += 1
+                    continue
+                html = client.get(url, force_browser=args.browser)
+                try:
+                    info = extract_video(html, url)
+                except ValueError:
+                    if client.page or args.no_browser:
+                        raise
+                    info = extract_video(client.get(url, force_browser=True), url)
+                print(f"Found {info['title']}: {len(info['formats'])} quality options", flush=True)
+                if args.check:
+                    checked += 1
+                    continue
+                args.output.mkdir(parents=True, exist_ok=True)
+                download_video(info, client, args.output)
+                history.parent.mkdir(parents=True, exist_ok=True)
+                with history.open("a", encoding="utf-8") as handle:
+                    handle.write("\n" + url + "\n")
+                completed.add(url_key(url))
+                downloaded += 1
+            except (OSError, ValueError, RuntimeError, requests.RequestException, DownloadError, BrowserError) as error:
+                failed.append(raw_url)
+                print(f"FAILED: {error}", file=sys.stderr, flush=True)
+    finally:
+        client.close()
+    if failed and not args.check:
+        args.output.mkdir(parents=True, exist_ok=True)
+        failure_path = args.output / "failed_dl.txt"
+        existing = read_urls(failure_path) if failure_path.exists() else []
+        failure_path.write_text("\n".join(dict.fromkeys(existing + failed)) + "\n", encoding="utf-8")
+    print(f"Done: {downloaded} downloaded, {skipped} skipped, {exported} collections, {checked} checked, {len(failed)} failed.")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\nCancelled. Partial downloads can be resumed on the next run.", file=sys.stderr)
+        sys.exit(130)
